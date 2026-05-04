@@ -82,19 +82,16 @@ class MnemosGeminiAdapter:
         if not function_declarations:
             return []
 
-        # TODO: Prefer proto Tool objects when google-generativeai is importable. Dicts are
-        # kept as the scaffold fallback because the SDK also accepts mapping-shaped tools.
-        if protos is not None:
-            try:
-                declarations = [
-                    protos.FunctionDeclaration(**declaration)
-                    for declaration in function_declarations
-                ]
-                return [protos.Tool(function_declarations=declarations)]
-            except Exception:
-                return [{"functionDeclarations": function_declarations}]
-
-        return [{"functionDeclarations": function_declarations}]
+        # NOTE: Gemini SDK's GenerativeModel(tools=[...]) accepts dict-shaped
+        # tool definitions with snake_case keys. The proto path
+        # (protos.FunctionDeclaration(**decl)) doesn't work because Gemini's
+        # Schema proto requires Type enum values (e.g. Type.OBJECT) in place
+        # of JSON Schema strings ("object"); a one-shot **kwargs construction
+        # raises KeyError on the type field. Returning the snake_case dict
+        # form is the documented + supported public API for tool registration.
+        # The previous camelCase ("functionDeclarations") was rejected by the
+        # SDK with "Unknown field for FunctionDeclaration".
+        return [{"function_declarations": function_declarations}]
 
     async def handle_function_call(self, fc: Any) -> dict[str, Any]:
         """Dispatch a Gemini FunctionCall to MCP and return a response part payload."""
@@ -129,23 +126,31 @@ class MnemosGeminiAdapter:
 
 
 async def _connect_mcp_client(mcp_url: str, *, headers: dict[str, str], timeout: float) -> Any:
-    connect = getattr(McpClient, "connect", None)
-    if connect is not None:
-        try:
-            return await _maybe_await(connect(mcp_url, headers=headers, timeout=timeout))
-        except TypeError:
-            return await _maybe_await(connect(mcp_url, token=headers["Authorization"], timeout=timeout))
+    # Strip 'Bearer ' prefix if present — core's McpClient takes the raw token.
+    auth_value = headers.get("Authorization", "")
+    token = auth_value.removeprefix("Bearer ").removeprefix("bearer ") if auth_value else ""
 
-    try:
-        client = McpClient(mcp_url, headers=headers, timeout=timeout)
-    except TypeError:
-        client = McpClient(mcp_url, headers["Authorization"], timeout=timeout)
+    # Preferred path (mnemos-bridge-core v0.1.2+): open_from_url constructs +
+    # opens the SSE session in one call. Falls back to from_url + __aenter__
+    # for older core builds.
+    opener = getattr(McpClient, "open_from_url", None)
+    if opener is not None:
+        return await opener(mcp_url, token=token, timeout=timeout)
 
-    instance_connect = getattr(client, "connect", None)
-    if instance_connect is not None:
-        connected = await _maybe_await(instance_connect())
-        if connected is not None:
-            return connected
+    from_url = getattr(McpClient, "from_url", None)
+    if from_url is not None:
+        client = from_url(mcp_url, token=token, timeout=timeout)
+        aenter = getattr(client, "__aenter__", None)
+        if aenter is not None:
+            await aenter()
+        return client
+
+    # Last-resort: direct constructor + open. Core's McpClient signature is
+    # __init__(url, *, token, timeout).
+    client = McpClient(mcp_url, token=token, timeout=timeout)
+    aenter = getattr(client, "__aenter__", None)
+    if aenter is not None:
+        await aenter()
     return client
 
 

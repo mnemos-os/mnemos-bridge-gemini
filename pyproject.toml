@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mnemos-bridge-gemini"
-version = "0.1.0"
+version = "0.1.1"
 description = "Google Gemini adapter for mnemos-bridge-core MCP tool bridges."
 readme = "README.md"
 license = "Apache-2.0"
